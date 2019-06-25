@@ -34,60 +34,74 @@ image_config: &image_config
 version: 2
 jobs:
   build:
-    machine: true
-    environment:
-      <<: *image_config
-
+    docker:
+    - image: circleci/ruby:2.5.5-stretch-node-browsers
+      environment:
+        RAILS_ENV: test
+        RACK_ENV: test
+        DATABASE_URL: postgres://root@localhost:5432/internationalsafety_test
+        PAGER: cat
+    - image: circleci/postgres:9.6.10-alpine-postgis-ram
+      environment:
+        POSTGRES_USER: root
+        POSTGRES_DB: setup_db
+    working_directory: ~/repo
     steps:
-      - checkout
+    - checkout
+    - restore_cache:
+        keys:
+        - v3-dependencies-{{ checksum "Gemfile.lock" }}
+        - v3-dependencies-
+    - restore_cache:
+        keys:
+        - yarn-packages-v3-{{ checksum "yarn.lock" }}
+        - yarn-packages-v3-
+    - run: gem install bundler -v 1.16.2
+    - run:
+        name: install dependencies
+        command: |
+          bundle install --jobs=4 --retry=3 --path vendor/bundle
+    - run: yarn install
+    - save_cache:
+        paths:
+        - ./vendor/bundle
+        key: v3-dependencies-{{ checksum "Gemfile.lock" }}
+    - save_cache:
+        paths:
+        - ~/.cache/yarn
+        key: yarn-packages-v3-{{ checksum "yarn.lock" }}
+    - run: bundle exec rails db:create
+    - run: bundle exec rails db:structure:load
+    - run: NODE_ENV=test bundle exec rails webpacker:compile
+    - run:
+        name: run rspec specs
+        command: |
+          mkdir /tmp/test-results
+          TEST_FILES="$(circleci tests glob "spec/models/*.rb spec/controllers/*.rb spec/features/*.rb" | circleci tests split --split-by=timings)"
 
-##      - run: bash scripts/generate.sh > Dockerfile
-
-##      - run: docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
-
-##      - run: docker build -t $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG .
-
-##      - run: docker push $DOCKER_USERNAME/$IMAGE_NAME:$IMAGE_TAG && sleep 10
-
-##      - store_artifacts:
-##          path: Dockerfile
-
-##  test_image:
-##    docker:
-##      - image: $DOCKER_USERNAME/(name of image):(image tag)
-##        environment:
-##          <<: *image_config
-
-##    steps:
-##      - checkout
-
-##      - run:
-##          name: start Xvfb for phantomjs test
-##          command: Xvfb :99
-##          background: true
-
-##      - run:
-##          name: bats tests
-##          command: |
-##            mkdir -p test_results/bats
-##            bats scripts/tests.bats | \
-##            perl scripts/tap-to-junit.sh > \
-##            test_results/bats/results.xml
-
-##      - store_test_results:
-##          path: test_results
-
-##      - store_artifacts:
-##          path: test_results
-
-##workflows:
-##  version: 2
-##  dockerfile_wizard:
-##    jobs:
-##      - build:
-##          context: org-global
-
-##      - test_image:
-##          context: org-global
-##          requires:
-##            - build
+          bundle exec rspec --format progress \
+                            --format RspecJunitFormatter \
+                            --out /tmp/test-results/rspec/rspec.xml \
+                            --format progress \
+                            $TEST_FILES
+    - run:
+        name: run jest tests
+        command: yarn test --ci --runInBand --reporters=default --reporters=jest-junit
+        environment:
+          JEST_JUNIT_OUTPUT: /tmp/test-results/junit/js-test-results.xml
+    - store_test_results:
+        path: /tmp/test-results
+    - store_artifacts:
+        path: /tmp/test-results
+        destination: test-results
+workflows:
+  version: 2
+  workflow:
+    jobs:
+    - build:
+        filters:
+          branches:
+            only:
+            - circleci-updates
+            - develop
+            - master
